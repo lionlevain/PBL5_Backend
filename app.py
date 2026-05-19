@@ -82,8 +82,6 @@ def register():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
-# API: QUÊN MẬT KHẨU (CHỈ CẦN SỐ ĐIỆN THOẠI)
 @app.route('/api/forgot-password', methods=['POST'])
 def forgot_password():
     try:
@@ -94,29 +92,16 @@ def forgot_password():
         if not phone or not new_password:
             return jsonify({"status": "error", "message": "Vui lòng truyền đủ thông tin!"}), 400
 
-        # Chỉ dùng số điện thoại để tìm người dùng
         user = users_collection.find_one({"phone": phone})
-        
         if not user:
             return jsonify({"status": "error", "message": "Số điện thoại chưa được đăng ký trong hệ thống!"}), 404
             
         hashed_new_password = generate_password_hash(new_password)
+        users_collection.update_one({"_id": user["_id"]}, {"$set": {"password": hashed_new_password}})
         
-        users_collection.update_one(
-            {"_id": user["_id"]}, 
-            {"$set": {"password": hashed_new_password}}
-        )
-        
-        # Trả về kèm theo username để nhắc cho người dùng nhớ
-        return jsonify({
-            "status": "success", 
-            "message": "Cập nhật mật khẩu thành công!",
-            "username": user["username"] 
-        }), 200
-        
+        return jsonify({"status": "success", "message": "Cập nhật mật khẩu thành công!", "username": user["username"]}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
 
 @app.route('/api/login', methods=['POST'])
 def login():
@@ -138,6 +123,7 @@ def login():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# API: GHI SỔ LÊN BLOCKCHAIN (ĐÃ NÂNG CẤP LƯU CẢ TXHASH VÀ NGÀY GIỜ VÀO MONGODB)
 @app.route('/api/harvest', methods=['POST'])
 def add_harvest():
     try:
@@ -146,21 +132,46 @@ def add_harvest():
         flower_type = data.get("flower_type")
         weight = int(data.get("weight"))
         
-        harvest_collection.insert_one({"farmer": farmer, "flower_type": flower_type, "weight": weight})
-        
         private_key = os.getenv("PRIVATE_KEY")
         contract_address = Web3.to_checksum_address(os.getenv("CONTRACT_ADDRESS"))
         account = w3.eth.account.from_key(private_key)
         contract = w3.eth.contract(address=contract_address, abi=contract_abi)
         
+        # 1. Thực hiện đẩy lên Blockchain trước để lấy mã giao dịch (TxHash)
         nonce = w3.eth.get_transaction_count(account.address)
         tx = contract.functions.addHarvest(farmer, flower_type, weight).build_transaction({
             'chainId': 11155111, 'gas': 3000000, 'gasPrice': w3.eth.gas_price, 'nonce': nonce
         })
         signed_tx = w3.eth.account.sign_transaction(tx, private_key=private_key)
         tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        tx_hash_hex = w3.to_hex(tx_hash)
         
-        return jsonify({"status": "success", "message": f"TxHash: {w3.to_hex(tx_hash)}"}), 200
+        # 2. Lấy thời gian thực ghi sổ
+        current_time = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+        
+        # 3. Tiến hành lưu bộ hồ sơ hoàn chỉnh (có mã băm bảo chứng) vào đám mây MongoDB
+        harvest_collection.insert_one({
+            "farmer": farmer, 
+            "flower_type": flower_type, 
+            "weight": weight,
+            "tx_hash": tx_hash_hex,
+            "date": current_time
+        })
+        
+        return jsonify({"status": "success", "message": f"TxHash: {tx_hash_hex}"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# API MỚI: LẤY TOÀN BỘ LỊCH SỬ PHIẾU GHI SỔ CỦA NÔNG HỘ
+@app.route('/api/history', methods=['GET'])
+def get_history():
+    try:
+        farmer = request.args.get("farmer", "").strip().lower()
+        # Lấy danh sách, sắp xếp phiếu mới nhất lên đầu tiên
+        records = list(harvest_collection.find({"farmer": farmer}).sort("_id", -1))
+        for r in records:
+            r["_id"] = str(r["_id"]) # Đổi định dạng ObjectId thành Chuỗi để tránh lỗi JSON
+        return jsonify({"status": "success", "records": records}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -175,6 +186,5 @@ def get_stats():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
-    # Ra lệnh cho Python: Nếu ở trên mây thì lấy Port của mây, nếu ở máy tính thì lấy 5000
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)

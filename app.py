@@ -6,11 +6,15 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import os
 import datetime
 import random
+import threading
 from dotenv import load_dotenv
 
 load_dotenv()
 app = Flask(__name__)
 CORS(app)
+
+# Khóa luồng (Lock) để giải quyết lỗi 2 người đẩy Blockchain cùng lúc
+tx_lock = threading.Lock()
 
 # 1. KẾT NỐI MONGODB CLOUD
 try:
@@ -44,6 +48,11 @@ contract_abi = [
         "type": "function"
     }
 ]
+
+# Hàm lấy thời gian chuẩn UTC+7 (Giờ Việt Nam)
+def get_vn_time():
+    vn_time = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
+    return vn_time.strftime("%d/%m/%Y %H:%M")
 
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -123,7 +132,6 @@ def login():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# API: GHI SỔ LÊN BLOCKCHAIN (ĐÃ NÂNG CẤP LƯU CẢ TXHASH VÀ NGÀY GIỜ VÀO MONGODB)
 @app.route('/api/harvest', methods=['POST'])
 def add_harvest():
     try:
@@ -132,24 +140,28 @@ def add_harvest():
         flower_type = data.get("flower_type")
         weight = int(data.get("weight"))
         
+        if weight <= 0:
+            return jsonify({"status": "error", "message": "Sản lượng không hợp lệ!"}), 400
+        
         private_key = os.getenv("PRIVATE_KEY")
         contract_address = Web3.to_checksum_address(os.getenv("CONTRACT_ADDRESS"))
         account = w3.eth.account.from_key(private_key)
         contract = w3.eth.contract(address=contract_address, abi=contract_abi)
         
-        # 1. Thực hiện đẩy lên Blockchain trước để lấy mã giao dịch (TxHash)
-        nonce = w3.eth.get_transaction_count(account.address)
-        tx = contract.functions.addHarvest(farmer, flower_type, weight).build_transaction({
-            'chainId': 11155111, 'gas': 3000000, 'gasPrice': w3.eth.gas_price, 'nonce': nonce
-        })
-        signed_tx = w3.eth.account.sign_transaction(tx, private_key=private_key)
-        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        tx_hash_hex = w3.to_hex(tx_hash)
+        # BẬT KHÓA LUỒNG: Giải quyết xung đột 2 người đẩy cùng lúc
+        with tx_lock:
+            # Dùng 'pending' để lấy nonce chuẩn nhất trong hàng đợi
+            nonce = w3.eth.get_transaction_count(account.address, 'pending')
+            tx = contract.functions.addHarvest(farmer, flower_type, weight).build_transaction({
+                'chainId': 11155111, 'gas': 3000000, 'gasPrice': w3.eth.gas_price, 'nonce': nonce
+            })
+            signed_tx = w3.eth.account.sign_transaction(tx, private_key=private_key)
+            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            tx_hash_hex = w3.to_hex(tx_hash)
         
-        # 2. Lấy thời gian thực ghi sổ
-        current_time = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+        # Lưu thời gian chuẩn Việt Nam
+        current_time = get_vn_time()
         
-        # 3. Tiến hành lưu bộ hồ sơ hoàn chỉnh (có mã băm bảo chứng) vào đám mây MongoDB
         harvest_collection.insert_one({
             "farmer": farmer, 
             "flower_type": flower_type, 
@@ -162,15 +174,13 @@ def add_harvest():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# API MỚI: LẤY TOÀN BỘ LỊCH SỬ PHIẾU GHI SỔ CỦA NÔNG HỘ
 @app.route('/api/history', methods=['GET'])
 def get_history():
     try:
         farmer = request.args.get("farmer", "").strip().lower()
-        # Lấy danh sách, sắp xếp phiếu mới nhất lên đầu tiên
         records = list(harvest_collection.find({"farmer": farmer}).sort("_id", -1))
         for r in records:
-            r["_id"] = str(r["_id"]) # Đổi định dạng ObjectId thành Chuỗi để tránh lỗi JSON
+            r["_id"] = str(r["_id"])
         return jsonify({"status": "success", "records": records}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -180,11 +190,21 @@ def get_stats():
     try:
         farmer = request.args.get("farmer", "").strip().lower()
         user_records = list(harvest_collection.find({"farmer": farmer}))
+        
+        # 1. Tính tổng toàn bộ sản lượng
         total_weight = sum(record.get("weight", 0) for record in user_records)
-        return jsonify({"status": "success", "total_weight": total_weight}), 200
+        
+        # 2. Tính riêng sản lượng hoa Loại 1 (Dựa vào chữ "Loại 1" trong tên phân loại)
+        loai1_weight = sum(record.get("weight", 0) for record in user_records if "Loại 1" in record.get("flower_type", ""))
+        
+        return jsonify({
+            "status": "success", 
+            "total_weight": total_weight,
+            "loai1_weight": loai1_weight  # Trả thêm dữ liệu này về cho Giao diện
+        }), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
+        
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)

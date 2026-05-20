@@ -157,7 +157,6 @@ def add_harvest():
         account = w3.eth.account.from_key(private_key)
         contract = w3.eth.contract(address=contract_address, abi=contract_abi)
         
-        # Ký và đẩy lên Blockchain Sepolia
         with tx_lock:
             nonce = w3.eth.get_transaction_count(account.address, 'pending')
             tx = contract.functions.addHarvest(farmer, combined_flower_type, weight).build_transaction({
@@ -205,7 +204,6 @@ def get_stats():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# API MỚI: DỰ BÁO THỜI TIẾT & KHUYẾN NGHỊ NÔNG NGHIỆP
 @app.route('/api/weather', methods=['GET'])
 def get_weather():
     weather_conditions = [

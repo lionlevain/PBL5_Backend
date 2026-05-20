@@ -49,7 +49,6 @@ contract_abi = [
     }
 ]
 
-# Hàm lấy thời gian chuẩn UTC+7 (Giờ Việt Nam)
 def get_vn_time():
     vn_time = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
     return vn_time.strftime("%d/%m/%Y %H:%M")
@@ -103,7 +102,7 @@ def forgot_password():
 
         user = users_collection.find_one({"phone": phone})
         if not user:
-            return jsonify({"status": "error", "message": "Số điện thoại chưa được đăng ký trong hệ thống!"}), 404
+            return jsonify({"status": "error", "message": "Số điện thoại chưa được đăng ký!"}), 404
             
         hashed_new_password = generate_password_hash(new_password)
         users_collection.update_one({"_id": user["_id"]}, {"$set": {"password": hashed_new_password}})
@@ -137,37 +136,45 @@ def add_harvest():
     try:
         data = request.json
         farmer = data.get("farmer").strip().lower()
-        flower_type = data.get("flower_type")
-        weight = int(data.get("weight"))
-        
+        ma_lo = data.get("ma_lo", "").strip()
+        flower_name = data.get("flower_name", "").strip()
+        ten_vuon = data.get("ten_vuon", "").strip()
+        ngay_thu = data.get("ngay_thu", "").strip()
+        khu_vuc = data.get("khu_vuc", "").strip()
+        weight = int(data.get("weight", 0))
+        gia_ban = data.get("gia_ban", "").strip()
+        quality = data.get("quality", "").strip()
+        ghi_chu = data.get("ghi_chu", "").strip()
+
         if weight <= 0:
             return jsonify({"status": "error", "message": "Sản lượng không hợp lệ!"}), 400
+        
+        # Đóng gói thông tin bắn lên Blockchain
+        combined_flower_type = f"{ma_lo}|{flower_name}|{ten_vuon}|{quality}|{gia_ban}"
         
         private_key = os.getenv("PRIVATE_KEY")
         contract_address = Web3.to_checksum_address(os.getenv("CONTRACT_ADDRESS"))
         account = w3.eth.account.from_key(private_key)
         contract = w3.eth.contract(address=contract_address, abi=contract_abi)
         
-        # BẬT KHÓA LUỒNG: Giải quyết xung đột 2 người đẩy cùng lúc
+        # Ký và đẩy lên Blockchain Sepolia
         with tx_lock:
-            # Dùng 'pending' để lấy nonce chuẩn nhất trong hàng đợi
             nonce = w3.eth.get_transaction_count(account.address, 'pending')
-            tx = contract.functions.addHarvest(farmer, flower_type, weight).build_transaction({
+            tx = contract.functions.addHarvest(farmer, combined_flower_type, weight).build_transaction({
                 'chainId': 11155111, 'gas': 3000000, 'gasPrice': w3.eth.gas_price, 'nonce': nonce
             })
             signed_tx = w3.eth.account.sign_transaction(tx, private_key=private_key)
             tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
             tx_hash_hex = w3.to_hex(tx_hash)
         
-        # Lưu thời gian chuẩn Việt Nam
         current_time = get_vn_time()
         
         harvest_collection.insert_one({
-            "farmer": farmer, 
-            "flower_type": flower_type, 
-            "weight": weight,
-            "tx_hash": tx_hash_hex,
-            "date": current_time
+            "farmer": farmer, "ma_lo": ma_lo, "flower_name": flower_name, "ten_vuon": ten_vuon,
+            "ngay_thu": ngay_thu, "khu_vuc": khu_vuc, "weight": weight, "gia_ban": gia_ban,
+            "quality": quality, "ghi_chu": ghi_chu,
+            "flower_type": f"{flower_name} - {quality}", 
+            "tx_hash": tx_hash_hex, "date": current_time
         })
         
         return jsonify({"status": "success", "message": f"TxHash: {tx_hash_hex}"}), 200
@@ -191,20 +198,23 @@ def get_stats():
         farmer = request.args.get("farmer", "").strip().lower()
         user_records = list(harvest_collection.find({"farmer": farmer}))
         
-        # 1. Tính tổng toàn bộ sản lượng
         total_weight = sum(record.get("weight", 0) for record in user_records)
-        
-        # 2. Tính riêng sản lượng hoa Loại 1 (Dựa vào chữ "Loại 1" trong tên phân loại)
         loai1_weight = sum(record.get("weight", 0) for record in user_records if "Loại 1" in record.get("flower_type", ""))
         
-        return jsonify({
-            "status": "success", 
-            "total_weight": total_weight,
-            "loai1_weight": loai1_weight  # Trả thêm dữ liệu này về cho Giao diện
-        }), 200
+        return jsonify({"status": "success", "total_weight": total_weight, "loai1_weight": loai1_weight}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-        
+
+# API MỚI: DỰ BÁO THỜI TIẾT & KHUYẾN NGHỊ NÔNG NGHIỆP
+@app.route('/api/weather', methods=['GET'])
+def get_weather():
+    weather_conditions = [
+        {"day": "Hôm nay", "temp": "28°C", "humidity": "65%", "status": "Trời nắng đẹp", "recommendation": "Rất thuận lợi để thu hoạch cúc đại đóa. Hoa sẽ đạt phẩm chất màu sắc tốt nhất.", "icon": "☀️", "color": "#059669"},
+        {"day": "Ngày mai", "temp": "33°C", "humidity": "50%", "status": "Nắng gắt", "recommendation": "Nên thu hoạch vào sáng sớm hoặc chiều mát. Tránh khung giờ trưa để hoa không bị héo nát.", "icon": "🌤️", "color": "#d97706"},
+        {"day": "Ngày kia", "temp": "24°C", "humidity": "88%", "status": "Mưa rào rải rác", "recommendation": "Cân nhắc hoãn thu hoạch. Hoa dính nước mưa dễ bị úng và nấm mốc khi đóng gói vận chuyển.", "icon": "🌧️", "color": "#ef4444"}
+    ]
+    return jsonify({"status": "success", "forecast": weather_conditions}), 200
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
